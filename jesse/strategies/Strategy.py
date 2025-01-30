@@ -15,6 +15,7 @@ from jesse.services.broker import Broker
 from jesse.store import store
 from jesse.services.cache import cached
 from jesse.services import notifier
+from jesse.services.color import generate_unique_hex_color
 
 
 class Strategy(ABC):
@@ -52,6 +53,12 @@ class Strategy(ABC):
         self.trade: ClosedTrade = None
         self.trades_count = 0
 
+        self._executed_orders = []
+        self._add_line_to_candle_chart_values = {}
+        self._add_extra_line_chart_values = {}
+        self._add_horizontal_line_to_candle_chart_values = {}
+        self._add_horizontal_line_to_extra_chart_values = {}
+
         self._is_executing = False
         self._is_initiated = False
         self._is_handling_updated_order = False
@@ -61,6 +68,96 @@ class Strategy(ABC):
 
         self._cached_methods = {}
         self._cached_metrics = {}
+
+        # Add cached price
+        self._cached_price = None
+
+    def add_line_to_candle_chart(self, title: str, value: float, color=None) -> None:
+        # validate value's type
+        if not isinstance(value, (int, float)):
+            raise ValueError(f"Invalid value type: {type(value)}. The value must be either int or float; you're passing {value}")
+
+        if title not in self._add_line_to_candle_chart_values:
+            self._add_line_to_candle_chart_values[title] = {
+                'data': [],
+                'color': color if color is not None else generate_unique_hex_color(),
+            }
+        self._add_line_to_candle_chart_values[title]['data'].append({
+            'time': int(self.current_candle[0] / 1000),
+            'value': value,
+            'color': color if color is not None else (self._add_line_to_candle_chart_values[title]['color'])
+        })
+
+    def add_horizontal_line_to_candle_chart(self, title: str, value: float, color=None, line_width=1.5, line_style='solid') -> None:
+        # validate value's type
+        if not isinstance(value, (int, float)):
+            raise ValueError(f"Invalid value type: {type(value)}. The value must be either int or float; you're passing {value}")
+
+        if line_style == 'solid':
+            lineStyle = 0
+        elif line_style == 'dotted':
+            lineStyle = 1
+        else:
+            raise ValueError(f"Invalid line_style: {line_style}")
+
+        if title in self._add_horizontal_line_to_candle_chart_values:
+            self._add_horizontal_line_to_candle_chart_values[title].update({
+                'price': value,
+                'color': color if color is not None else self._add_horizontal_line_to_candle_chart_values[title]['color'],
+                'lineWidth': line_width,
+                'lineStyle': lineStyle,
+            })
+        else:
+            self._add_horizontal_line_to_candle_chart_values[title] = {
+                'title': title,
+                'price': value,
+                'color': color if color is not None else generate_unique_hex_color(),
+                'lineWidth': line_width,
+                'lineStyle': lineStyle,
+            }
+
+    def add_horizontal_line_to_extra_chart(self, chart_name: str, title: str, value: float, color=None, line_width=1.5, line_style='solid') -> None:
+        # validate value's type
+        if not isinstance(value, (int, float)):
+            raise ValueError(f"Invalid value type: {type(value)}. The value must be either int or float; you're passing {value}")
+
+        if line_style == 'solid':
+            lineStyle = 0
+        elif line_style == 'dotted':
+            lineStyle = 1
+        else:
+            raise ValueError(f"Invalid line_style: {line_style}")
+
+        if chart_name not in self._add_horizontal_line_to_extra_chart_values:
+            self._add_horizontal_line_to_extra_chart_values[chart_name] = {}
+
+        self._add_horizontal_line_to_extra_chart_values[chart_name][title] = {
+            'price': value,
+            'color': color if color is not None else generate_unique_hex_color(),
+            'lineWidth': line_width,
+            'lineStyle': lineStyle,
+            'title': title
+        }
+
+    def add_extra_line_chart(self, chart_name: str, title: str, value: float, color=None) -> None:
+        # validate value's type
+        if not isinstance(value, (int, float)):
+            raise ValueError(f"Invalid value type: {type(value)}. The value must be either int or float; you're passing {value}")
+
+        if chart_name not in self._add_extra_line_chart_values:
+            self._add_extra_line_chart_values[chart_name] = {}
+
+        if title not in self._add_extra_line_chart_values[chart_name]:
+            self._add_extra_line_chart_values[chart_name][title] = {
+                'data': [],
+                'color': color if color is not None else generate_unique_hex_color(),
+            }
+
+        self._add_extra_line_chart_values[chart_name][title]['data'].append({
+            'time': int(self.current_candle[0] / 1000),
+            'value': value,
+            'color': color if color is not None else (self._add_extra_line_chart_values[chart_name][title]['color'])
+        })
 
     def _init_objects(self) -> None:
         """
@@ -116,6 +213,25 @@ class Strategy(ABC):
 
             r.strategy._detect_and_handle_entry_and_exit_modifications()
 
+    def _handle_executed_order_for_chart(self, order: Order):
+        position_type = ''
+        if self.position.is_long:
+            position_type = 'LONG'
+        elif self.position.is_short:
+            position_type = 'SHORT'
+        elif self.position.is_close and self.position.previous_qty > 0:
+            position_type = 'LONG'
+        elif self.position.is_close and self.position.previous_qty < 0:
+            position_type = 'SHORT'
+
+        self._executed_orders.append({
+            'time': int(self.current_candle[0] / 1000),
+            'position': 'aboveBar' if order.side == sides.SELL else 'belowBar',
+            'color': '#e91e63' if order.side == sides.SELL else '#2196F3',
+            'shape': 'arrowDown' if order.side == sides.SELL else 'arrowUp',
+            'text': f'{order.side.upper()} • {position_type}'
+        })
+
     def _on_updated_position(self, order: Order) -> None:
         """
         Handles the after-effect of the executed order to execute strategy
@@ -124,6 +240,8 @@ class Strategy(ABC):
         """
         # in live-mode, sometimes order-update effects and new execution has overlaps, so:
         self._is_handling_updated_order = True
+
+        self._handle_executed_order_for_chart(order)
 
         # this is the last executed order, and had its effect on
         # the position. We need to know what its effect was:
@@ -140,7 +258,7 @@ class Strategy(ABC):
         elif abs(after_qty) > abs(before_qty):
             effect = 'increased_position'
         # if reducing position size
-        else: # abs(after_qty) < abs(before_qty):
+        else:  # abs(after_qty) < abs(before_qty):
             effect = 'reduced_position'
 
         # call the relevant strategy event handler:
@@ -165,7 +283,7 @@ class Strategy(ABC):
             if jh.is_live() and jh.get_config('env.notifications.events.updated_position'):
                 notifier.notify(txt)
             self._on_increased_position(order)
-        else: # if effect == 'reduced_position':
+        else:  # if effect == 'reduced_position':
             txt = f"REDUCED Position size to {after_qty}"
             if jh.is_debuggable('position_reduced'):
                 logger.info(txt)
@@ -441,9 +559,12 @@ class Strategy(ABC):
     def should_short(self) -> bool:
         return False
 
-    @abstractmethod
     def should_cancel_entry(self) -> bool:
-        pass
+        """
+        Whether to cancel the active  entry orders or not. By default, it will cancel the
+        entry orders when a new candle is formed and the position is still not open.
+        """
+        return True
 
     def before(self) -> None:
         """
@@ -521,7 +642,7 @@ class Strategy(ABC):
                         temp_current_price = None
 
                     # CANCEL previous orders
-                    for o in self.exit_orders:
+                    for o in self.active_exit_orders:
                         if o.is_take_profit and (o.is_active or o.is_queued):
                             self.broker.cancel_order(o.id)
 
@@ -562,7 +683,7 @@ class Strategy(ABC):
                         temp_current_price = None
 
                     # CANCEL previous orders
-                    for o in self.exit_orders:
+                    for o in self.active_exit_orders:
                         if o.is_stop_loss and (o.is_active or o.is_queued):
                             self.broker.cancel_order(o.id)
 
@@ -598,6 +719,7 @@ class Strategy(ABC):
                 self.position.is_open
                 and (self.stop_loss is not None and self.take_profit is not None)
                 and np.array_equal(self.stop_loss, self.take_profit)
+                and len(self.stop_loss) > 0
         ):
             raise exceptions.InvalidStrategy(
                 'stop-loss and take-profit should not be exactly the same. Just use either one of them and it will do.')
@@ -659,11 +781,12 @@ class Strategy(ABC):
                     if jh.is_debugging():
                         logger.info(f'Waiting {waiting_seconds} second for pending market exit orders to be handled...')
                     waiting_counter += 1
-                    sleep(1)
-                    if waiting_counter > 10:
+                    if waiting_counter > 22:
                         raise exceptions.ExchangeNotResponding(
                             'The exchange did not respond as expected for order execution'
                         )
+                    else:
+                        sleep(1)
 
         self._simulate_market_order_execution()
 
@@ -673,7 +796,7 @@ class Strategy(ABC):
 
             should_short = self.should_short()
             # validate that should_short is not True if the exchange_type is spot
-            if self.exchange_type == 'spot' and should_short is True:
+            if self.exchange_type == 'spot' and should_short:
                 raise exceptions.InvalidStrategy(
                     'should_short cannot be True if the exchange type is "spot".'
                 )
@@ -843,16 +966,21 @@ class Strategy(ABC):
         Handles the execution permission for the strategy.
         """
         # make sure we don't execute this strategy more than once at the same time.
-        if self._is_executing is True:
+        if self._is_executing:
             return
 
         self._is_executing = True
-
+        
+        # Cache the current price at the start of execution
+        self._cached_price = self.close
+        
         self.before()
         self._check()
         self.after()
         self._clear_cached_methods()
 
+        # Clear the cached price
+        self._cached_price = None
         self._is_executing = False
         self.index += 1
 
@@ -950,10 +1078,15 @@ class Strategy(ABC):
     def price(self) -> float:
         """
         Same as self.close, except in livetrade, this is rounded as the exchanges require it.
+        During strategy execution cycles, returns cached price to ensure consistency.
 
         Returns:
             [float] -- the current trading candle's current(close) price
         """
+        # Return cached price if we're executing
+        if self._is_executing and self._cached_price is not None:
+            return self._cached_price
+            
         return self.close
 
     @property
@@ -1219,19 +1352,25 @@ class Strategy(ABC):
 
         # in spot mode, self.balance does not include open order's value, so:
         if self.is_spot_trading:
+            # Add value of active entry orders
+            entry_orders_value = 0
             for o in self.entry_orders:
                 if o.is_active:
-                    total_position_values += o.value
+                    entry_orders_value += o.value
 
+            # Add value of all positions
+            positions_value = 0
             for key, p in self.all_positions.items():
-                total_position_values += p.value
+                positions_value += p.value
+
+            total_position_values = entry_orders_value + positions_value
 
         # in futures mode, it's simpler:
         elif self.is_futures_trading:
             for key, p in self.all_positions.items():
                 total_position_values += p.pnl
 
-        return (total_position_values + self.balance) * self.leverage
+        return (total_position_values * self.leverage) + self.balance
 
     @property
     def trades(self) -> List[ClosedTrade]:
@@ -1260,6 +1399,13 @@ class Strategy(ABC):
         Returns all the exit orders for this position.
         """
         return store.orders.get_exit_orders(self.exchange, self.symbol)
+
+    @property
+    def active_exit_orders(self):
+        """
+        Returns all the exit orders for this position.
+        """
+        return store.orders.get_active_exit_orders(self.exchange, self.symbol)
 
     @property
     def exchange_type(self):

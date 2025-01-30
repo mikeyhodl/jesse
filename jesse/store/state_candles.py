@@ -1,8 +1,6 @@
-from time import time
 import numpy as np
 
 import jesse.helpers as jh
-import jesse.indicators
 import jesse.services.selectors as selectors
 from jesse.config import config
 from jesse.enums import timeframes
@@ -83,9 +81,7 @@ class CandlesState:
         try:
             return self.storage[key]
         except KeyError:
-            raise RouteNotFound(
-                f"Bellow route is required but missing in your routes:\n('{exchange}', '{symbol}', '{timeframe}')"
-            )
+            raise RouteNotFound(symbol, timeframe)
 
     def init_storage(self, bucket_size: int = 1000) -> None:
         for ar in selectors.get_all_routes():
@@ -111,13 +107,6 @@ class CandlesState:
             with_generation: bool = True,
             with_skip: bool = True
     ) -> None:
-        if jh.is_collecting_data():
-            raise NotImplemented("Collecting data is deactivated at the moment")
-            # make sure it's a complete (and not a forming) candle
-            # if jh.now_to_timestamp() >= (candle[0] + 60000):
-            #     store_candle_into_db(exchange, symbol, candle)
-            # return
-
         # overwrite with_generation based on the config value for live sessions
         if jh.is_live() and not jh.get_config('env.data.generate_candles_from_1m'):
             with_generation = False
@@ -243,7 +232,7 @@ class CandlesState:
         # get position object
         p = selectors.get_position(exchange, symbol)
 
-        # for extra_route candles, p == None, hence no further action is required
+        # for data_route candles, p == None, hence no further action is required
         if p is None:
             return
 
@@ -331,7 +320,6 @@ class CandlesState:
         short_key = jh.key(exchange, symbol, '1m')
         required_1m_to_complete_count = jh.timeframe_to_one_minutes(timeframe)
         current_1m_count = len(self.get_storage(exchange, symbol, '1m'))
-
         dif = current_1m_count % required_1m_to_complete_count
         return dif, long_key, short_key
 
@@ -358,8 +346,8 @@ class CandlesState:
         # complete candle
         if dif == 0 or self.storage[long_key][:long_count][-1][0] == self.storage[short_key][short_count - dif][0]:
             return self.storage[long_key][:long_count]
-        # generate forming
-        else:
+        # generate forming candle only if NOT in live mode
+        elif not jh.is_live():
             return np.concatenate(
                 (
                     self.storage[long_key][:long_count],
@@ -374,6 +362,9 @@ class CandlesState:
                     )
                 ), axis=0
             )
+        # in live mode, just return the complete candles
+        else:
+            return self.storage[long_key][:long_count]
 
     def get_current_candle(self, exchange: str, symbol: str, timeframe: str) -> np.ndarray:
         # no need to worry for forming candles when timeframe == 1m
@@ -389,7 +380,7 @@ class CandlesState:
         long_count = len(self.get_storage(exchange, symbol, timeframe))
         short_count = len(self.get_storage(exchange, symbol, '1m'))
 
-        # complete candle
+        # forming candle
         if dif != 0:
             return generate_candle_from_one_minutes(
                 timeframe, self.storage[short_key][short_count - dif:short_count],
@@ -399,3 +390,33 @@ class CandlesState:
             return np.zeros((0, 6))
         else:
             return self.storage[long_key][-1]
+
+    def add_multiple_1m_candles(
+        self,
+        candles: np.ndarray,
+        exchange: str,
+        symbol: str,
+    ) -> None:
+        if not (jh.is_backtesting() or jh.is_optimizing()):
+            raise Exception('add_multiple_1m_candles() is for backtesting or optimizing only')
+
+        arr: DynamicNumpyArray = self.get_storage(exchange, symbol, '1m')
+
+        # initial
+        if len(arr) == 0:
+            arr.append_multiple(candles)
+
+        # if it's new, add
+        elif candles[0, 0] > arr[-1][0]:
+            arr.append_multiple(candles)
+
+        # if it's the last candle again, update
+        elif candles[0, 0] >= arr[-len(candles)][0] and candles[-1, 0] >= arr[-1][0]:
+            override_candles = int(
+                len(candles) - ((candles[-1, 0] - arr[-1][0]) / 60000)
+            )
+            arr[-override_candles:] = candles
+
+        # Otherwise,it's true and error.
+        else:
+            raise IndexError(f"Could not find the candle with timestamp {jh.timestamp_to_time(candles[0, 0])} in the storage. Last candle's timestamp: {jh.timestamp_to_time(arr[-1][0])}. exchange: {exchange}, symbol: {symbol}")

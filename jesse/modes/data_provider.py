@@ -1,4 +1,5 @@
 import json
+import os
 import numpy as np
 import peewee
 from fastapi.responses import FileResponse
@@ -102,14 +103,14 @@ def get_config(client_config: dict, has_live=False) -> dict:
                 if k not in live_trading_exchanges:
                     del data['live']['exchanges'][k]
 
-        o.updated_at = jh.now()
+        o.updated_at = jh.now(True)
         o.save()
     except peewee.DoesNotExist:
         # if not found, that means it's the first time. Store in the DB and
         # then return what was sent from the client side without changing it
         o = Option({
             'id': jh.generate_unique_id(),
-            'updated_at': jh.now(),
+            'updated_at': jh.now(True),
             'type': 'config',
             'json': json.dumps(client_config)
         })
@@ -134,7 +135,7 @@ def update_config(client_config: dict):
     o = Option.get(Option.type == 'config')
 
     o.json = json.dumps(client_config)
-    o.updated_at = jh.now()
+    o.updated_at = jh.now(True)
 
     o.save()
 
@@ -145,9 +146,6 @@ def download_file(mode: str, file_type: str, session_id: str = None):
     if mode == 'backtest' and file_type == 'log':
         path = f'storage/logs/backtest-mode/{session_id}.txt'
         filename = f'backtest-{session_id}.txt'
-    elif mode == 'backtest' and file_type == 'chart':
-        path = f'storage/charts/{session_id}.png'
-        filename = f'backtest-{session_id}.png'
     elif mode == 'backtest' and file_type == 'csv':
         path = f'storage/csv/{session_id}.csv'
         filename = f'backtest-{session_id}.csv'
@@ -168,3 +166,15 @@ def download_file(mode: str, file_type: str, session_id: str = None):
         raise Exception(f'Unknown file type: {file_type} or mode: {mode}')
 
     return FileResponse(path=path, filename=filename, media_type='application/octet-stream')
+
+
+def get_backtest_logs(session_id: str):
+    path = f"storage/logs/backtest-mode/{session_id}.txt"
+
+    if not os.path.exists(path):
+        return None
+
+    with open(path, "r") as f:
+        content = f.read()
+
+    return content

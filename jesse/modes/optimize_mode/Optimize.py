@@ -7,26 +7,27 @@ from random import choices, randint
 import click
 import numpy as np
 import pydash
-from numpy import ndarray
 from pandas import json_normalize
 from timeloop import Timeloop
 
 import jesse.helpers as jh
 import jesse.services.logger as logger
 from jesse import exceptions, sync_publish
-from jesse.modes.optimize_mode.fitness import (
-    create_baby, get_and_add_fitness_to_the_bucket)
+from jesse.modes.optimize_mode.fitness import create_baby, get_and_add_fitness_to_the_bucket
 from jesse.routes import router
 from jesse.services.progressbar import Progressbar
-from jesse.services.redis import process_status
+from jesse.services.redis import is_process_active
 from jesse.store import store
 
 
 class Optimizer(ABC):
     def __init__(
             self,
-            training_candles: ndarray,
-            testing_candles: ndarray,
+            training_warmup_candles: dict,
+            training_candles: dict,
+            testing_warmup_candles: dict,
+            testing_candles: dict,
+            fast_mode: bool,
             optimal_total: int,
             cpu_cores: int,
             csv: bool,
@@ -58,17 +59,21 @@ class Optimizer(ABC):
         self.solution_len = solution_len
         self.charset = charset
         self.fitness_goal = fitness_goal
+        self.fast_mode = fast_mode
         self.cpu_cores = 0
         self.optimal_total = optimal_total
+        self.training_warmup_candles = training_warmup_candles
         self.training_candles = training_candles
+        self.testing_warmup_candles = testing_warmup_candles
         self.testing_candles = testing_candles
         self.average_execution_seconds = 0
 
+        client_id = jh.get_session_id()
         # check for termination event once per second
         tl_0 = Timeloop()
         @tl_0.job(interval=timedelta(seconds=1))
         def check_for_termination():
-            if process_status() != 'started':
+            if is_process_active(client_id) is False:
                 raise exceptions.Termination
         tl_0.start()
 
@@ -86,7 +91,7 @@ class Optimizer(ABC):
 
         self.options = {} if options is None else options
         os.makedirs('./storage/temp/optimize', exist_ok=True)
-        self.temp_path = f"./storage/temp/optimize/{self.options['strategy_name']}-{self.options['exchange']}-{self.options['symbol']}-{self.options['timeframe']}-{self.options['start_date']}-{self.options['finish_date']}.pickle"
+        # self.temp_path = f"./storage/temp/optimize/{self.options['strategy_name']}-{self.options['exchange']}-{self.options['symbol']}-{self.options['timeframe']}-{self.options['start_date']}-{self.options['finish_date']}.pickle"
 
         if fitness_goal > 1 or fitness_goal < 0:
             raise ValueError('fitness scores must be between 0 and 1')
@@ -126,9 +131,9 @@ class Optimizer(ABC):
                         w = Process(
                             target=get_and_add_fitness_to_the_bucket,
                             args=(
-                                dna_bucket, jh.get_config('env.optimization'), router.formatted_routes, router.formatted_extra_routes,
-                                self.strategy_hp, dna, self.training_candles, self.testing_candles,
-                                self.optimal_total
+                                dna_bucket, jh.get_config('env.optimization'), router.formatted_routes, router.formatted_data_routes,
+                                self.strategy_hp, dna, self.training_warmup_candles, self.training_candles, self.testing_warmup_candles, self.testing_candles,
+                                self.optimal_total, self.fast_mode
                             )
                         )
                         w.start()
@@ -206,7 +211,7 @@ class Optimizer(ABC):
             self.generate_initial_population()
 
             if len(self.population) < 0.5 * self.population_size:
-                msg = f'Too many errors! less than half of the expected population size could be generated. Only {len(self.population)} indviduals from planned {self.population_size} are usable.'
+                msg = f'Too many errors! less than half of the expected population size could be generated. Only {len(self.population)} individuals from planned {self.population_size} are usable. Read more at https://jesse.trade/help/faq/bad-optimization-results-or-valueerror-too-many-errors-less-than-half-of-the-expected-population-size-could-be-generated'
                 logger.log_optimize_mode(msg)
                 raise ValueError(msg)
 
@@ -234,9 +239,9 @@ class Optimizer(ABC):
                             args=(
                                 people_bucket, mommy, daddy, self.solution_len, self.charset,
                                 jh.get_config('env.optimization'), router.formatted_routes,
-                                router.formatted_extra_routes,
-                                self.strategy_hp, self.training_candles, self.testing_candles,
-                                self.optimal_total
+                                router.formatted_data_routes,
+                                self.strategy_hp, self.training_warmup_candles, self.training_candles, self.testing_warmup_candles, self.testing_candles,
+                                self.optimal_total, self.fast_mode
                             )
                         )
                         w.start()
@@ -366,7 +371,6 @@ class Optimizer(ABC):
 
     def run(self) -> list:
         return self.evolve()
-
 
     @staticmethod
     def _handle_termination(manager, workers):

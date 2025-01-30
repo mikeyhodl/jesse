@@ -17,14 +17,6 @@ from .state_trades import TradesState
 def install_routes() -> None:
     considering_candles = set()
 
-    # when importing market data, considering_candles is all we need
-    if jh.is_collecting_data():
-        for r in router.market_data:
-            considering_candles.add((r.exchange, r.symbol))
-
-        config['app']['considering_candles'] = tuple(considering_candles)
-        return
-
     # validate routes for duplicates:
     # each exchange-symbol pair can be traded only once.
     for r in router.routes:
@@ -61,7 +53,7 @@ def install_routes() -> None:
     considering_timeframes = trading_timeframes.copy()
     considering_symbols = trading_symbols.copy()
 
-    for e in router.extra_candles:
+    for e in router.data_candles:
         considering_candles.add((e['exchange'], e['symbol']))
         considering_exchanges.add(e['exchange'])
         considering_symbols.add(e['symbol'])
@@ -117,8 +109,4 @@ class StoreClass:
         self.orderbooks = OrderbookState()
 
 
-# if not jh.is_unit_testing():
-#     install_routes()
-
 store = StoreClass()
-# store.reset()

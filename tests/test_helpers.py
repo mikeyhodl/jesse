@@ -11,7 +11,7 @@ def test_app_currency():
     from jesse.routes import router
     from jesse.enums import exchanges, timeframes
     router.initiate(
-        [{'exchange': exchanges.BITFINEX_SPOT, 'symbol': 'ETH-USD', 'timeframe': timeframes.HOUR_3, 'strategy': 'Test19'}])
+        [{'exchange': exchanges.BINANCE_SPOT, 'symbol': 'ETH-USD', 'timeframe': timeframes.HOUR_3, 'strategy': 'Test19'}])
     assert jh.app_currency() == 'USD'
 
 
@@ -87,8 +87,9 @@ def test_dashy_symbol():
     assert jh.dashy_symbol('BTCUSD') == 'BTC-USD'
     assert jh.dashy_symbol('BTCUSDT') == 'BTC-USDT'
     assert jh.dashy_symbol('BTC-USDT') == 'BTC-USDT'
-    assert jh.dashy_symbol('SBTCSUSDT') == 'SBTC-SUSDT'
-    assert jh.dashy_symbol('SEOSSUSDT') == 'SEOS-SUSDT'
+    assert jh.dashy_symbol('BTCEUR') == 'BTC-EUR'
+    assert jh.dashy_symbol('1INCHUSDT') == '1INCH-USDT'
+    assert jh.dashy_symbol('SCUSDT') == 'SC-USDT'
 
 
 def test_date_diff_in_days():
@@ -243,10 +244,6 @@ def test_insert_list():
 
 def test_is_backtesting():
     assert jh.is_backtesting() is True
-
-
-def test_is_collecting_data():
-    assert jh.is_collecting_data() is False
 
 
 def test_is_debuggable():
@@ -467,6 +464,23 @@ def test_round_qty_for_live_mode():
     assert res == expected_result
     assert type(res) == float
 
+    np.testing.assert_equal(
+        jh.round_qty_for_live_mode(np.array([102]), -2),
+        np.array([100])
+    )
+    np.testing.assert_equal(
+        jh.round_qty_for_live_mode(np.array([123]), -2),
+        np.array([100])
+    )
+    np.testing.assert_equal(
+        jh.round_qty_for_live_mode(np.array([163]), -2),
+        np.array([100])
+    )
+    np.testing.assert_equal(
+        jh.round_qty_for_live_mode(np.array([1263]), -2),
+        np.array([1200])
+    )
+
 
 def test_round_decimals_down():
     assert jh.round_decimals_down(100.329, 2) == 100.32
@@ -505,21 +519,6 @@ def test_style():
 def test_terminate_app():
     # uses database, which is not existing during testing
     pass
-
-
-def test_timeframe_to_one_minutes():
-    assert jh.timeframe_to_one_minutes('1m') == 1
-    assert jh.timeframe_to_one_minutes('3m') == 3
-    assert jh.timeframe_to_one_minutes('5m') == 5
-    assert jh.timeframe_to_one_minutes('15m') == 15
-    assert jh.timeframe_to_one_minutes('30m') == 30
-    assert jh.timeframe_to_one_minutes('1h') == 60
-    assert jh.timeframe_to_one_minutes('2h') == 60 * 2
-    assert jh.timeframe_to_one_minutes('3h') == 60 * 3
-    assert jh.timeframe_to_one_minutes('4h') == 60 * 4
-    assert jh.timeframe_to_one_minutes('6h') == 60 * 6
-    assert jh.timeframe_to_one_minutes('8h') == 60 * 8
-    assert jh.timeframe_to_one_minutes('1D') == 60 * 24
 
 
 def test_timestamp_to_arrow():
@@ -648,7 +647,8 @@ def test_round_or_none():
 
 def test_is_price_near():
     assert jh.is_price_near(0.007386, 0.007385) == True
-    assert jh.is_price_near(0.007386, 0.007396) == True
+    assert jh.is_price_near(0.007386, 0.007396) == False
+    assert jh.is_price_near(0.0250, 0.0249) == False
     assert jh.is_price_near(60000, 60000) == True
     assert jh.is_price_near(60000, 60000.1) == True
     assert jh.is_price_near(60000, 60100) == False

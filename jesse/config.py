@@ -1,7 +1,7 @@
 import jesse.helpers as jh
 from jesse.modes.utils import get_exchange_type
 from jesse.enums import exchanges
-from jesse.info import exchange_info, jesse_supported_timeframes
+from jesse.info import exchange_info
 
 
 config = {
@@ -22,6 +22,7 @@ config = {
             'shorter_period_candles': False,
             'trading_candles': True,
             'balance_update': True,
+            'exchange_ws_reconnection': True
         },
 
         # fill it later in this file using data in info.py
@@ -116,7 +117,7 @@ def set_config(conf: dict) -> None:
         # exchange info (only one because the optimize mode supports only one trading route at the moment)
         config['env']['optimization']['exchange'] = conf['exchange']
         # warm_up_candles
-        config['env']['optimization']['warmup_candles_num'] = int(conf['warm_up_candles'])
+        config['env']['data']['warmup_candles_num'] = int(conf['warm_up_candles'])
 
     # backtest and live
     if jh.is_backtesting() or jh.is_live():
@@ -137,9 +138,9 @@ def set_config(conf: dict) -> None:
             }
             if config['env']['exchanges'][e['name']]['type'] == 'futures':
                 # 1x, 2x, 10x, 50x, etc. Enter as integers
-                config['env']['exchanges'][e['name']]['futures_leverage'] = int(e['futures_leverage'])
+                config['env']['exchanges'][e['name']]['futures_leverage'] = int(e.get('futures_leverage', 1))
                 # accepted values are: 'cross' and 'isolated'
-                config['env']['exchanges'][e['name']]['futures_leverage_mode'] = e['futures_leverage_mode']
+                config['env']['exchanges'][e['name']]['futures_leverage_mode'] = e.get('futures_leverage_mode', 'cross')
 
     # live mode only
     if jh.is_live():

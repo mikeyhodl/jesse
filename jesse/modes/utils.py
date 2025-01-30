@@ -3,7 +3,10 @@ from jesse.services import logger
 from jesse.info import exchange_info
 
 
-def save_daily_portfolio_balance() -> None:
+def save_daily_portfolio_balance(is_initial=False) -> None:
+    if is_initial:
+        logger.reset()
+
     from jesse.store import store
 
     # # store daily_balance of assets into database
@@ -22,22 +25,23 @@ def save_daily_portfolio_balance() -> None:
     try:
         e, = store.exchanges.storage.values()
     except ValueError:
-        raise ValueError('Multiple exchange support is temporarily not supported. Will be implemented soon.')
+        raise ValueError('Multiple exchange support is not supported at the moment')
+    
     if e.type == 'futures':
-        try:
-            total_balances += e.assets[jh.app_currency()]
-        except KeyError:
-            raise ValueError('Invalid quote trading pair. Check your trading route\'s symbol')
-
-    for key, pos in store.positions.storage.items():
-        if pos.exchange_type == 'futures' and pos.is_open:
-            total_balances += pos.pnl
-        elif pos.exchange_type == 'spot':
-            total_balances += pos.strategy.portfolio_value
+        # For futures, add wallet balance and sum of all PNLs
+        total_balances = e.assets[jh.app_currency()]
+        for key, pos in store.positions.storage.items():
+            if pos.is_open:
+                total_balances += pos.pnl
+    else:
+        # For spot, just get portfolio_value from any strategy (they all share the same wallet)
+        # Get the first strategy we can find
+        for key, pos in store.positions.storage.items():
+            total_balances = pos.strategy.portfolio_value
+            break
 
     store.app.daily_balance.append(total_balances)
 
-    # TEMP: disable storing in database for now
     if not jh.is_livetrading():
         logger.info(f'Saved daily portfolio balance: {round(total_balances, 2)}')
 

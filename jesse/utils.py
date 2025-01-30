@@ -7,6 +7,7 @@ import pandas as pd
 
 import jesse.helpers as jh
 from jesse.enums import timeframes
+import statsmodels.api as sm
 
 
 def anchor_timeframe(timeframe: str) -> str:
@@ -312,26 +313,53 @@ def combinations_without_repeat(a: np.ndarray, n: int = 2) -> np.ndarray:
     return np.array(list(permutations(a, n)))
 
 
-def wavelet_denoising(raw: np.ndarray, wavelet='haar', level: int = 1, mode: str = 'symmetric',
-                      smoothing_factor: float = 0, threshold_mode: str = 'hard') -> np.ndarray:
-    """
-    deconstructs, thresholds then reconstructs
-    higher thresholds = less detailed reconstruction
+def calculate_alpha_beta(returns1: np.ndarray, returns2: np.ndarray) -> tuple:
+    # Add a constant to the independent variable (returns2)
+    X = sm.add_constant(returns2)  # Independent variable
+    model = sm.OLS(returns1, X).fit()  # Fit the model
+    alpha = model.params[0]  # Intercept (alpha)
+    beta = model.params[1]  # Slope (beta)
+    return alpha, beta
 
-    Only consider haar, db, sym, coif wavelet basis functions, as these are relatively suitable for financial data
+
+def timeframe_to_one_minutes(timeframe: str) -> int:
     """
-    import pywt
-    # Deconstruct
-    coeff = pywt.wavedec(raw, wavelet, mode=mode)
-    # Mean absolute deviation of a signal
-    max_level = pywt.dwt_max_level(len(raw), wavelet)
-    level = min(level, max_level)
-    madev = np.mean(np.absolute(coeff[-level] - np.mean(coeff[-level])))
-    # The hardcored factor is explained here: https://en.wikipedia.org/wiki/Median_absolute_deviation
-    sigma = (1 / 0.67449) * madev * smoothing_factor
-    threshold = sigma * np.sqrt(2 * np.log(len(raw)))
-    coeff[1:] = (pywt.threshold(i, value=threshold, mode=threshold_mode) for i in coeff[1:])
-    signal = pywt.waverec(coeff, wavelet, mode=mode)
-    if len(signal) > len(raw):
-        signal = np.delete(signal, -1)
-    return signal
+    Converts a given timeframe to its equivalent in minutes.
+
+    :param timeframe: str - The timeframe to convert. Supported timeframes include:
+        - '1m', '3m', '5m', '15m', '30m', '45m', '1h', '2h', '3h', '4h', '6h', '8h', '12h', 
+          '1d', '3d', '1w', '1M'.
+    :return: int - The equivalent number of minutes for the given timeframe.
+
+    :raises InvalidTimeframe: If the provided timeframe is not supported.
+    """
+    from jesse.enums import timeframes
+    from jesse.exceptions import InvalidTimeframe
+
+    dic = {
+        timeframes.MINUTE_1: 1,
+        timeframes.MINUTE_3: 3,
+        timeframes.MINUTE_5: 5,
+        timeframes.MINUTE_15: 15,
+        timeframes.MINUTE_30: 30,
+        timeframes.MINUTE_45: 45,
+        timeframes.HOUR_1: 60,
+        timeframes.HOUR_2: 60 * 2,
+        timeframes.HOUR_3: 60 * 3,
+        timeframes.HOUR_4: 60 * 4,
+        timeframes.HOUR_6: 60 * 6,
+        timeframes.HOUR_8: 60 * 8,
+        timeframes.HOUR_12: 60 * 12,
+        timeframes.DAY_1: 60 * 24,
+        timeframes.DAY_3: 60 * 24 * 3,
+        timeframes.WEEK_1: 60 * 24 * 7,
+        timeframes.MONTH_1: 60 * 24 * 30,
+    }
+
+    try:
+        return dic[timeframe]
+    except KeyError:
+        all_timeframes = [timeframe for timeframe in jh.class_iter(timeframes)]
+        raise InvalidTimeframe(
+            f'Timeframe "{timeframe}" is invalid. Supported timeframes are {", ".join(all_timeframes)}.'
+        )

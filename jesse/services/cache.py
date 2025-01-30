@@ -21,7 +21,7 @@ class Cache:
                 with open(f"{self.path}cache_database.pickle", 'rb') as f:
                     try:
                         self.db = pickle.load(f)
-                    except EOFError:
+                    except (EOFError, pickle.UnpicklingError, UnicodeDecodeError):
                         # File got broken
                         self.db = {}
             # if not, create a dict object. We'll create the file when using set_value()
@@ -48,7 +48,7 @@ class Cache:
 
     def get_value(self, key: str) -> Any:
         if self.driver is None:
-            return
+            raise ValueError('Caching driver is not set.')
 
         try:
             item = self.db[key]
@@ -57,7 +57,16 @@ class Cache:
 
         # if expired, remove file, and database record
         if item['expire_at'] is not None and time() > item['expire_at']:
-            os.remove(item['path'])
+            try:
+                os.remove(item['path'])
+            except FileNotFoundError:
+                pass
+            del self.db[key]
+            self._update_db()
+            return False
+
+        # If the cache file doesn't exist, remove the database record
+        if not os.path.exists(item['path']):
             del self.db[key]
             self._update_db()
             return False
@@ -67,13 +76,20 @@ class Cache:
             item['expire_at'] = time() + item['expire_seconds']
             self._update_db()
 
-        with open(item['path'], 'rb') as f:
-            try:
+        try:
+            with open(item['path'], 'rb') as f:
                 cache_value = pickle.load(f)
-            except EOFError:
-                # File got broken
-                cache_value = False
-            return cache_value
+        except (EOFError, pickle.UnpicklingError, FileNotFoundError):
+            # If there's any error reading the file, remove the record and return False
+            try:
+                os.remove(item['path'])
+            except FileNotFoundError:
+                pass
+            del self.db[key]
+            self._update_db()
+            return False
+
+        return cache_value
 
     def _update_db(self) -> None:
         # store/update database
@@ -84,9 +100,19 @@ class Cache:
         if self.driver is None:
             return
 
-        for key, item in self.db.items():
-            os.remove(item['path'])
-        self.db = {}
+        # Create a list of keys to remove to avoid modifying dict during iteration
+        keys_to_remove = list(self.db.keys())
+        
+        for key in keys_to_remove:
+            item = self.db[key]
+            try:
+                os.remove(item['path'])
+            except FileNotFoundError:
+                pass
+            del self.db[key]
+        
+        # Update the database file after clearing
+        self._update_db()
 
 
 cache = Cache("storage/temp/")

@@ -1,7 +1,9 @@
 import hashlib
 import math
 import os
-from pathlib import Path
+import gzip
+import json
+from functools import lru_cache
 import random
 import string
 import sys
@@ -10,17 +12,21 @@ from typing import List, Tuple, Union, Any, Optional
 from pprint import pprint
 import arrow
 import click
-import numpy
 import numpy as np
 
 CACHED_CONFIG = dict()
 
 
 def app_currency() -> str:
+    from jesse.info import exchange_info
     from jesse.routes import router
-    return quote_asset(router.routes[0].symbol)
+    if router.routes[0].exchange in exchange_info and 'settlement_currency' in exchange_info[router.routes[0].exchange]:
+        return exchange_info[router.routes[0].exchange]['settlement_currency']
+    else:
+        return quote_asset(router.routes[0].symbol)
 
 
+@lru_cache
 def app_mode() -> str:
     from jesse.config import config
     return config['app']['trading_mode']
@@ -115,11 +121,50 @@ def dashy_symbol(symbol: str) -> str:
         if compare_symbol == symbol:
             return s
 
+    if symbol.endswith('EUR'):
+        return symbol[:-3] + '-EUR'
+    if symbol.endswith('EUT'):
+        return symbol[:-3] + '-EUT'
+    if symbol.endswith('GBP'):
+        return symbol[:-3] + '-GBP'
+    if symbol.endswith('JPY'):
+        return symbol[:-3] + '-JPY'
+    if symbol.endswith('MIM'):
+        return symbol[:-3] + '-MIM'
+    if symbol.endswith('TRY'):
+        return symbol[:-3] + '-TRY'
+    if symbol.endswith('FDUSD'):
+        return symbol[:-5] + '-FDUSD'
+    if symbol.endswith('TUSD'):
+        return symbol[:-4] + '-TUSD'
+    if symbol.endswith('UST'):
+        return symbol[:-3] + '-UST'
+    if symbol.endswith('USDT'):
+        return symbol[:-4] + '-USDT'
+    if symbol.endswith('USDC'):
+        return symbol[:-4] + '-USDC'
+    if symbol.endswith('USDS'):
+        return symbol[:-4] + '-USDS'
+    if symbol.endswith('USDP'):
+        return symbol[:-4] + '-USDP'
+    if symbol.endswith('USDU'):
+        return symbol[:-4] + '-USDU'
+    if symbol.endswith('USD'):
+        return symbol[:-3] + '-USD'
+
     if len(symbol) > 7 and symbol.endswith('SUSDT'):
         # ex: SETHSUSDT => SETH-SUSDT
         return symbol[:-5] + '-' + symbol[-5:]
 
     return f"{symbol[0:3]}-{symbol[3:]}"
+
+
+def underline_to_dashy_symbol(symbol: str) -> str:
+    return symbol.replace('_', '-')
+
+
+def dashy_to_underline(symbol: str) -> str:
+    return symbol.replace('-', '_')
 
 
 def date_diff_in_days(date1: arrow.arrow.Arrow, date2: arrow.arrow.Arrow) -> int:
@@ -237,6 +282,10 @@ def generate_unique_id() -> str:
     return str(uuid.uuid4())
 
 
+def generate_short_unique_id() -> str:
+    return str(uuid.uuid4())[:22]
+
+
 def get_arrow(timestamp: int) -> arrow.arrow.Arrow:
     return timestamp_to_arrow(timestamp)
 
@@ -303,9 +352,47 @@ def get_store():
 
 def get_strategy_class(strategy_name: str):
     from pydoc import locate
+    import os
+    import re
 
     if not is_unit_testing():
-        return locate(f'strategies.{strategy_name}.{strategy_name}')
+        strategy_class = locate(f'strategies.{strategy_name}.{strategy_name}')
+        if strategy_class is None:
+            # Try to find any class that inherits from Strategy in the module
+            module = locate(f'strategies.{strategy_name}')
+            if module:
+                strategy_file = os.path.join('strategies', strategy_name, '__init__.py')
+                if os.path.exists(strategy_file):
+                    with open(strategy_file, 'r') as f:
+                        content = f.read()
+                    
+                    # Find the class definition
+                    class_pattern = r'class\s+(\w+)'
+                    match = re.search(class_pattern, content)
+                    if match:
+                        old_class_name = match.group(1)
+                        if old_class_name != strategy_name:
+                            # Replace the class name in the file
+                            new_content = re.sub(f'class {old_class_name}', f'class {strategy_name}', content)
+                            with open(strategy_file, 'w') as f:
+                                f.write(new_content)
+                            
+                            # Reload the module to get the updated class
+                            import importlib
+                            module_path = f'strategies.{strategy_name}'
+                            if module_path in sys.modules:
+                                del sys.modules[module_path]
+                            strategy_class = locate(f'strategies.{strategy_name}.{strategy_name}')
+                            return strategy_class
+
+                for attr_name in dir(module):
+                    attr = getattr(module, attr_name)
+                    if isinstance(attr, type) and attr.__module__ == f'strategies.{strategy_name}':
+                        # Create a new class with the correct name as fallback
+                        strategy_class = type(strategy_name, (attr,), {})
+                        break
+        return strategy_class
+
     path = sys.path[0]
     # live plugin
     if path.endswith('jesse-live'):
@@ -336,14 +423,12 @@ def is_backtesting() -> bool:
     return config['app']['trading_mode'] == 'backtest'
 
 
-def is_collecting_data() -> bool:
-    from jesse.config import config
-    return config['app']['trading_mode'] == 'collect'
-
-
 def is_debuggable(debug_item) -> bool:
     from jesse.config import config
-    return is_debugging() and config['env']['logging'][debug_item]
+    try:
+        return is_debugging() and config['env']['logging'][debug_item]
+    except KeyError:
+        return True
 
 
 def is_debugging() -> bool:
@@ -360,11 +445,13 @@ def is_live() -> bool:
     return is_livetrading() or is_paper_trading()
 
 
+@lru_cache
 def is_livetrading() -> bool:
     from jesse.config import config
     return config['app']['trading_mode'] == 'livetrade'
 
 
+@lru_cache
 def is_optimizing() -> bool:
     from jesse.config import config
     return config['app']['trading_mode'] == 'optimize'
@@ -376,7 +463,7 @@ def is_paper_trading() -> bool:
 
 
 def is_unit_testing() -> bool:
-    """Returns True if the code is running by running pytest, False otherwise."""
+    """Returns True if the code is running by running pytest or PyCharm's test runner, False otherwise."""
     # Check if the PYTEST_CURRENT_TEST environment variable is set.
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return True
@@ -386,7 +473,11 @@ def is_unit_testing() -> bool:
     if script_name in ["pytest", "py.test"]:
         return True
 
-    # Otherwise, the code is not running by running pytest.
+    # Check if the code is being executed from PyCharm's test runner.
+    if os.environ.get("PYCHARM_HOSTED"):
+        return True
+
+    # Otherwise, the code is not running by running pytest or PyCharm's test runner.
     return False
 
 
@@ -449,15 +540,20 @@ def now(force_fresh=False) -> int:
     """
     Always returns the current time in milliseconds but rounds time in matter of seconds
     """
-    return now_to_timestamp(force_fresh)
+    return int(now_to_timestamp(force_fresh))
 
 
 def now_to_timestamp(force_fresh=False) -> int:
-    if not force_fresh and (not (is_live() or is_collecting_data() or is_importing_candles())):
+    if not force_fresh and (not (is_live() or is_importing_candles())):
         from jesse.store import store
         return store.app.time
 
     return arrow.utcnow().int_timestamp * 1000
+
+
+# for use with peewee
+def now_to_datetime():
+    return arrow.utcnow().datetime
 
 
 def current_1m_candle_timestamp():
@@ -497,6 +593,7 @@ def np_shift(arr: np.ndarray, num: int, fill_value=0) -> np.ndarray:
     return result
 
 
+@lru_cache
 def opposite_side(s: str) -> str:
     from jesse.enums import sides
 
@@ -508,6 +605,7 @@ def opposite_side(s: str) -> str:
         raise ValueError(f'{s} is not a valid input for side')
 
 
+@lru_cache
 def opposite_type(t: str) -> str:
     from jesse.enums import trade_types
 
@@ -694,6 +792,7 @@ def should_execute_silently() -> bool:
     return is_optimizing() or is_unit_testing()
 
 
+@lru_cache
 def side_to_type(s: str) -> str:
     from jesse.enums import trade_types, sides
 
@@ -757,38 +856,7 @@ def _print_error(msg: str) -> None:
     print('\n')
     print(color('========== critical error =========='.upper(), 'red'))
     print(color(msg, 'red'))
-
-
-def timeframe_to_one_minutes(timeframe: str) -> int:
-    from jesse.enums import timeframes
-    from jesse.exceptions import InvalidTimeframe
-
-    dic = {
-        timeframes.MINUTE_1: 1,
-        timeframes.MINUTE_3: 3,
-        timeframes.MINUTE_5: 5,
-        timeframes.MINUTE_15: 15,
-        timeframes.MINUTE_30: 30,
-        timeframes.MINUTE_45: 45,
-        timeframes.HOUR_1: 60,
-        timeframes.HOUR_2: 60 * 2,
-        timeframes.HOUR_3: 60 * 3,
-        timeframes.HOUR_4: 60 * 4,
-        timeframes.HOUR_6: 60 * 6,
-        timeframes.HOUR_8: 60 * 8,
-        timeframes.HOUR_12: 60 * 12,
-        timeframes.DAY_1: 60 * 24,
-        timeframes.DAY_3: 60 * 24 * 3,
-        timeframes.WEEK_1: 60 * 24 * 7,
-        timeframes.MONTH_1: 60 * 24 * 30,
-    }
-
-    try:
-        return dic[timeframe]
-    except KeyError:
-        all_timeframes = [timeframe for timeframe in class_iter(timeframes)]
-        raise InvalidTimeframe(
-            f'Timeframe "{timeframe}" is invalid. Supported timeframes are {", ".join(all_timeframes)}.')
+    print(color('====================================', 'red'))
 
 
 def timestamp_to_arrow(timestamp: int) -> arrow.arrow.Arrow:
@@ -822,6 +890,7 @@ def today_to_timestamp() -> int:
     return arrow.utcnow().floor('day').int_timestamp * 1000
 
 
+@lru_cache
 def type_to_side(t: str) -> str:
     from jesse.enums import trade_types, sides
 
@@ -933,6 +1002,22 @@ def dump(*item):
     )
 
 
+def debug(*item):
+    """
+    Used for debugging when developing Jesse. Prints the item in pretty format in both
+    the terminal and the log file.
+    """
+    if len(item) == 1:
+        dump(f"==> {item[0]}")
+    else:
+        dump(f"==> {', '.join(str(x) for x in item)}")
+    from jesse.services import logger
+    if len(item) == 1:
+        logger.info(f"==> {item[0]}")
+    else:
+        logger.info(f"==> {', '.join(str(x) for x in item)}")
+
+
 def float_or_none(item):
     """
     Return the float of the value if it's not None
@@ -954,7 +1039,7 @@ def str_or_none(item, encoding='utf-8'):
         if isinstance(item, str):
             return item
 
-        if type(item) == numpy.float64:
+        if type(item) == np.float64:
             return str(item)
 
         try:
@@ -1034,21 +1119,23 @@ def get_candle_start_timestamp_based_on_timeframe(timeframe: str, num_candles_to
     return finish_date - (num_candles_to_fetch * one_min_count * 60_000)
 
 
-def is_price_near(order_price, price_to_compare):
+def is_price_near(order_price, price_to_compare, percentage_threshold=0.00015):
     """
-    Check if given order price is near the specified price.
-    This function checks a range of price values and applies the associated threshold.
-
-    :param order_price: float
-    :param price_to_compare: float
-    :return: bool
+    Check if the given order price is near the specified price.
+    Default percentage_threshold is 0.015% (0.00015)
+    We calculate percentage difference between the two prices rounded to 4 decimal places, 
+    so low-priced orders can be properly compared within 0.015% range.
     """
-    # Define the price ranges and associated thresholds
-    conditions = [order_price < 0.01, order_price < 1, order_price < 100, order_price < 10000, order_price >= 10000]
-    threshold_ratios = [0.015, 0.01, 0.005, 0.001, 0.0001]
+    return abs(1 - (order_price / price_to_compare)) <= percentage_threshold
 
-    # Use np.select to choose the threshold ratio based on the conditions
-    threshold_ratio = np.select(conditions, threshold_ratios)
 
-    threshold = threshold_ratio * order_price
-    return abs(order_price - price_to_compare) <= threshold
+def gzip_compress(data):
+    """Compress data using gzip."""
+    json_data = json.dumps(data).encode('utf-8')
+    # Compress the JSON string
+    return gzip.compress(json_data)
+
+
+def timeframe_to_one_minutes(timeframe: str) -> int:
+    from jesse.utils import timeframe_to_one_minutes
+    return timeframe_to_one_minutes(timeframe)
