@@ -20,6 +20,7 @@ from jesse.store import store
 from jesse.services.cache import cached
 from jesse.services import notifier
 from jesse.services.color import generate_unique_hex_color
+from jesse.research.ml import load_ml_model as _load_ml_model
 
 
 class Strategy(ABC):
@@ -68,8 +69,9 @@ class Strategy(ABC):
         # Variables used for ML calculations
         self._ml_data_points = []  # Stores complete data points with features and labels
         self._current_ml_point = None  # Tracks the currently open data point
-        self._ml_model = None  # Cached loaded model (loaded once on first prediction)
-        self._ml_scaler = None  # Cached loaded scaler (loaded once on first prediction)
+        self._ml_model = None  # Cached loaded model (populated by load_ml_model())
+        self._ml_scaler = None  # Cached loaded scaler (populated by load_ml_model())
+        self._ml_feature_importance = None  # Cached feature importance (populated by load_ml_model())
 
         self._is_executing = False
         self._is_initiated = False
@@ -122,7 +124,7 @@ class Strategy(ABC):
         if self._current_ml_point is not None:
             self._current_ml_point['label'] = {
                 'name': name,
-                'value': value
+                'value': value 
             }
 
             # Move this completed data point to our storage and clear the current point
@@ -131,7 +133,7 @@ class Strategy(ABC):
         else:
             jh.debug(f"record_label('{name}') called with no open data point — did you forget to call record_features() first?")
 
-    def export_ml_data(self, directory: str = None) -> bool:
+    def export_ml_data(self, directory: str | None = None) -> bool:
         """
         Export all recorded features and labels to CSV files.
         Returns True if export was successful, False otherwise.
@@ -139,10 +141,6 @@ class Strategy(ABC):
         Args:
             directory: Optional output directory. Defaults to strategy location.
         """
-        import os
-        import sys
-        import csv
-
         try:
             # Determine output directory
             if directory is None:
@@ -204,6 +202,36 @@ class Strategy(ABC):
         except Exception as e:
             jh.debug(f"Unexpected error during ML data export: {e}")
             return False
+
+    def load_ml_model(self) -> None:
+        """
+        Load the model, scaler, and (if present) feature importance from the
+        strategy's own directory and cache them on the instance.
+
+        After this call:
+            ``self._ml_model``              – fitted estimator
+            ``self._ml_scaler``             – fitted StandardScaler
+            ``self._ml_feature_importance`` – feature importance dict (or None)
+
+        The method is idempotent: if the model is already loaded it returns
+        immediately, so it is safe to call on every bar inside an inference
+        method without any extra guard in the strategy.
+        """
+        if self._ml_model is not None:
+            return
+
+        try:
+            module = sys.modules[self.__class__.__module__]
+            strategy_dir = os.path.dirname(os.path.abspath(module.__file__))
+        except Exception as e:
+            raise FileNotFoundError(
+                f"Could not determine strategy directory from module '{self.__class__.__module__}': {e}"
+            )
+
+        artefacts = _load_ml_model(strategy_dir)
+        self._ml_model              = artefacts["model"]
+        self._ml_scaler             = artefacts["scaler"]
+        self._ml_feature_importance = artefacts.get("feature_importance")
 
     def get_ml_prediction(self) -> dict:
         """
