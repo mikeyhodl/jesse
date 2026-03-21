@@ -67,6 +67,8 @@ class Strategy(ABC):
         self._add_horizontal_line_to_extra_chart_values = {}
 
         # Variables used for ML calculations
+        self.ml_mode = "gather" # "gather" or "deploy"
+
         self._ml_data_points = []  # Stores complete data points with features and labels
         self._current_ml_point = None  # Tracks the currently open data point
         self._ml_model = None  # Cached loaded model (populated by load_ml_model())
