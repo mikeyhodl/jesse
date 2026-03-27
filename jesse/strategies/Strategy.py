@@ -67,13 +67,12 @@ class Strategy(ABC):
         self._add_horizontal_line_to_extra_chart_values = {}
 
         # Variables used for ML calculations
-        self.ml_mode = "gather" # "gather" or "deploy"
-
-        self._ml_data_points = []  # Stores complete data points with features and labels
-        self._current_ml_point = None  # Tracks the currently open data point
-        self._ml_model = None  # Cached loaded model (populated by load_ml_model())
-        self._ml_scaler = None  # Cached loaded scaler (populated by load_ml_model())
-        self._ml_feature_importance = None  # Cached feature importance (populated by load_ml_model())
+        self.ml_mode = getattr(type(self), 'ml_mode', 'gather')
+        self._ml_data_points = []
+        self._current_ml_point = None
+        self._ml_model = None
+        self._ml_scaler = None
+        self._ml_feature_importance = None
 
         self._is_executing = False
         self._is_initiated = False
@@ -205,7 +204,7 @@ class Strategy(ABC):
             jh.debug(f"Unexpected error during ML data export: {e}")
             return False
 
-    def load_ml_model(self) -> None:
+    def _load_ml_artifacts(self) -> None:
         """
         Load the model, scaler, and (if present) feature importance from the
         strategy's own directory and cache them on the instance.
@@ -216,8 +215,8 @@ class Strategy(ABC):
             ``self._ml_feature_importance`` – feature importance dict (or None)
 
         The method is idempotent: if the model is already loaded it returns
-        immediately, so it is safe to call on every bar inside an inference
-        method without any extra guard in the strategy.
+        immediately, so it is safe to call internally on every bar without
+        any extra guard.
         """
         if self._ml_model is not None:
             return
@@ -235,90 +234,92 @@ class Strategy(ABC):
         self._ml_scaler             = artefacts["scaler"]
         self._ml_feature_importance = artefacts.get("feature_importance")
 
-    def get_ml_prediction(self) -> dict:
+    def ml_features(self) -> dict:
         """
-        Get ML prediction using the most recently recorded features.
+        Override this method to define the features used for both ML data gathering
+        and inference. It is the single source of truth for feature computation —
+        define it once and the framework uses it in both gather mode (via
+        ``record_features``) and deploy mode (via ``ml_predict`` /
+        ``ml_predict_proba``).
+
+        Called automatically by ``ml_predict()`` and ``ml_predict_proba()``.
 
         Returns:
-            Dictionary containing:
-            - 'prediction': bool (True/False prediction)
-            - 'probability': float (0-1 probability of positive class)
+            dict: ``{feature_name: value}`` pairs. All values should be normalised
+                  (ratios, z-scores, log-returns) so the model generalises across
+                  different price regimes.
+
+        Example::
+
+            def ml_features(self) -> dict:
+                import jesse.indicators as ta
+                atr   = ta.atr(self.candles) + 1e-9
+                price = self.price
+                return {
+                    "rsi_centered":    (ta.rsi(self.candles) - 50) / 50,
+                    "atr_pct":         atr / price,
+                    "ema9_dist":       (price - ta.ema(self.candles, 9))
+                                       / (ta.ema(self.candles, 9) + 1e-9),
+                    "supertrend_dist": (price - ta.supertrend(self.candles).trend) / atr,
+                }
+        """
+        raise NotImplementedError(
+            "Override ml_features() in your strategy to define ML features. "
+            "Return a dict of {feature_name: value} pairs."
+        )
+
+    def ml_predict(self) -> float:
+        """
+        For **regression** models. Loads the model lazily (idempotent), builds
+        features by calling ``self.ml_features()``, scales them with the fitted
+        scaler, and returns the scalar prediction.
+
+        You do not need to load the model manually — it is handled
+        internally. You also never need to touch ``self._ml_scaler`` or
+        ``self._ml_model`` directly.
+
+        Returns:
+            float: The model's scalar prediction (e.g. an expected log-return).
 
         Raises:
-            ValueError: If no features have been recorded or model not trained
-            FileNotFoundError: If model files are missing (with detailed path info)
+            NotImplementedError: If ``ml_features()`` has not been overridden.
+            FileNotFoundError:   If ``model.pkl`` / ``scaler.pkl`` are missing.
         """
-        # Check if we have features to predict with
-        if self._current_ml_point is None or not self._current_ml_point['features']:
-            raise ValueError("No features recorded for prediction. Call record_features() first.")
+        self._load_ml_artifacts()
+        feats = self.ml_features()
+        keys  = sorted(feats.keys())
+        X     = np.array([[feats[k] for k in keys]])
+        return float(self._ml_model.predict(self._ml_scaler.transform(X))[0])
 
-        # Resolve strategy directory reliably via the module registry
-        try:
-            module = sys.modules[self.__class__.__module__]
-            strategy_dir = os.path.dirname(os.path.abspath(module.__file__))
-        except Exception as e:
-            raise FileNotFoundError(
-                f"Could not determine strategy directory from module '{self.__class__.__module__}': {e}"
-            )
+    def ml_predict_proba(self) -> dict:
+        """
+        For **classification** models (binary or multiclass). Loads the model
+        lazily (idempotent), builds features by calling ``self.ml_features()``,
+        scales them, and returns a probability dict keyed by class label.
 
-        # Load model and scaler once and cache them for the lifetime of this strategy instance
-        if self._ml_model is None or self._ml_scaler is None:
-            model_path = os.path.join(strategy_dir, "svm_model.pkl")
-            scaler_path = os.path.join(strategy_dir, "scaler.pkl")
+        You do not need to load the model manually — it is handled
+        internally. You also never need to touch ``self._ml_scaler`` or
+        ``self._ml_model`` directly.
 
-            # Check what files actually exist (for helpful error messages)
-            existing_files = [f for f in os.listdir(strategy_dir) if not f.startswith('.')]
-            jh.debug(f"[ML] Loading model from: {strategy_dir}")
+        Returns:
+            dict: ``{class_label: probability}`` mapping.
 
-            if not os.path.exists(model_path):
-                raise FileNotFoundError(
-                    f"Model file NOT FOUND at: {model_path}\n"
-                    f"Current directory: {os.getcwd()}\n"
-                    f"Files in strategy dir ({strategy_dir}): {existing_files}"
-                )
-            if not os.path.exists(scaler_path):
-                raise FileNotFoundError(
-                    f"Scaler file NOT FOUND at: {scaler_path}\n"
-                    f"Current directory: {os.getcwd()}\n"
-                    f"Files in strategy dir ({strategy_dir}): {existing_files}"
-                )
+            - Binary model   → ``{0: float, 1: float}``
+            - Multiclass model → e.g. ``{-1: float, 0: float, 1: float}``
 
-            try:
-                self._ml_model = joblib.load(model_path)
-                self._ml_scaler = joblib.load(scaler_path)
-                jh.debug("[ML] Model and scaler loaded and cached successfully")
-            except Exception as e:
-                raise FileNotFoundError(
-                    f"Failed to load model files from {strategy_dir}\n"
-                    f"Error: {str(e)}\n"
-                    f"Files in directory ({strategy_dir}): {existing_files}"
-                )
+            Use ``.get(1, 0.0)`` to safely retrieve the probability of a
+            specific class without risking a ``KeyError``.
 
-        svm_model = self._ml_model
-        scaler = self._ml_scaler
-
-        # Get current features
-        current_features = self._current_ml_point['features']
-
-        # Create feature array from current features
-        # We'll use the same order as when training (alphabetical)
-        sorted_features = sorted(current_features.keys())
-        feature_array = np.array([
-            current_features[feature] for feature in sorted_features
-        ]).reshape(1, -1)
-
-        # Scale and predict
-        try:
-            feature_array_scaled = scaler.transform(feature_array)
-            prediction = svm_model.predict(feature_array_scaled)[0]
-            probabilities = svm_model.predict_proba(feature_array_scaled)[0]
-
-            return {
-                'prediction': bool(prediction),
-                'probability': float(probabilities[1])
-            }
-        except Exception as e:
-            raise ValueError(f"Prediction failed: {e}. Check feature consistency with training data.")
+        Raises:
+            NotImplementedError: If ``ml_features()`` has not been overridden.
+            FileNotFoundError:   If ``model.pkl`` / ``scaler.pkl`` are missing.
+        """
+        self._load_ml_artifacts()
+        feats = self.ml_features()
+        keys  = sorted(feats.keys())
+        X     = np.array([[feats[k] for k in keys]])
+        probs = self._ml_model.predict_proba(self._ml_scaler.transform(X))[0]
+        return {int(cls): float(p) for cls, p in zip(self._ml_model.classes_, probs)}
 
     def add_line_to_candle_chart(self, title: str, value: float, color=None) -> None:
         # validate value's type
