@@ -77,8 +77,7 @@ docker run --rm \
   -e TWINE_USERNAME=__token__ \
   -e TWINE_PASSWORD="${PYPI_TOKEN}" \
   "${PYTHON_RELEASE_IMAGE}" \
-  sh -lc '
-    set -Eeuo pipefail
+  sh -eu -c '
     python -m pip install --no-cache-dir --upgrade pip build twine
     rm -rf dist build *.egg-info
     python -m build
