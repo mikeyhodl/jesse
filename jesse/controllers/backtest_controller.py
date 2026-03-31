@@ -91,7 +91,7 @@ def get_logs(session_id: str, token: str = Query(...)):
 
 
 @router.get("/download-log/{session_id}")
-def download_backtest_log(session_id: str, token: str = Query(...)):
+def download_backtest_log_handler(session_id: str, token: str = Query(...)):
     """
     Download log file for a specific backtest session
     """
