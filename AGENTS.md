@@ -3,6 +3,14 @@
 ## Overview
 The jesse repository is the **core open-source framework** of the Jesse trading system. It contains the main Python codebase for backtesting trading strategies, importing historical data from crypto exchanges, running optimizations, and providing the API backend for the dashboard. It glues together the other repositories and makes them work together.
 
+## Skills
+
+This repo stores shared **Agent Skills** in `.claude/skills/` — focused, task-specific playbooks used by Claude Code and Codex. Codex also discovers them through the repository-relative `.agents/skills` symlink.
+
+Before starting a task, scan the YAML frontmatter of every `.claude/skills/*/SKILL.md`. When a skill's `description` matches the task, read that `SKILL.md` completely before acting. A matching skill is the authoritative reference for what it covers, and its details are deliberately kept out of this file. This scan is the cross-platform fallback if native skill discovery or symlink support is unavailable.
+
+- **`jesse-strategy-tests`** — conventions for writing Jesse strategy and engine tests.
+
 ## Key Characteristics
 
 ### Central Framework
@@ -196,4 +204,3 @@ This repository is the foundation of the Jesse ecosystem:
 - **go-jesse-trade/backend** - Go project that contains the api2 backend of the jesse-trade website.
 - **go-jesse-trade/frontend** - NuxtJS project that contains the frontend of the jesse-trade website.
 - **strategy-executor** - Go project that contains the strategy executor microservice used to execute strategies submitted by the users of the website.
-
