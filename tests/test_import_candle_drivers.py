@@ -327,3 +327,121 @@ def test_apex_rejects_malformed_or_unsupported_responses(monkeypatch, payload, e
 def test_futures_driver_page_sizes_match_live_provider_limits():
     assert drivers['Kraken Pro Futures']().count == 2_000
     assert drivers['KuCoin USDT Perpetual']().count == 200
+
+
+def test_binance_starting_time_is_the_exact_first_minute_candle(monkeypatch):
+    # regression: the weekly lookup skipped the listing week and returned a future date for
+    # symbols listed within the last seven days, which made their imports fail outright.
+    driver = drivers['Binance Perpetual Futures']()
+    captured = {}
+    listing = 1_775_483_400_000  # 2026-04-06 13:50 UTC
+
+    def request(url, params=None):
+        captured.update(params or {})
+        return FakeResponse([[listing, '1', '3', '0.5', '2', '4', listing + 59_999]])
+
+    monkeypatch.setattr(driver, '_make_request', request)
+
+    assert driver.get_starting_time('AAPL-USDT') == listing
+    assert captured == {'interval': '1m', 'symbol': 'AAPLUSDT', 'startTime': 0, 'limit': 1}
+
+    monkeypatch.setattr(driver, '_make_request', lambda url, params=None: FakeResponse([]))
+    assert driver.get_starting_time('AAPL-USDT') is None
+    request_range = HistoricalCandleRange(1_700_000_000_000, 1_800_000_000_000)
+    assert driver.find_earliest_available_timestamp(
+        HistoricalCandleRequest('AAPL-USDT', '1m', request_range)
+    ) == request_range.start_timestamp
+
+
+def test_bybit_starting_time_is_the_first_minute_candle(monkeypatch):
+    driver = drivers['Bybit USDT Perpetual']()
+    captured = {}
+    listing = 1_585_132_560_000
+
+    def request(url, params=None, timeout=None):
+        captured.update(params or {})
+        return FakeResponse({'retMsg': 'OK', 'result': {'list': [[str(listing), '1', '3', '0.5', '2', '4', '9']]}})
+
+    monkeypatch.setattr(driver.session, 'get', request)
+
+    assert driver.get_starting_time('BTC-USDT') == listing
+    assert captured['interval'] == '1' and captured['limit'] == 1 and captured['symbol'] == 'BTCUSDT'
+
+    monkeypatch.setattr(driver.session, 'get', lambda url, params=None, timeout=None: FakeResponse({'retMsg': 'OK', 'result': {'list': []}}))
+    assert driver.get_starting_time('BTC-USDT') is None
+
+
+def test_apex_starting_time_narrows_month_week_day_hour_minute(monkeypatch):
+    driver = drivers['Apex Omni Perpetual']()
+    listing = 1_718_420_640_000  # 2024-06-15 03:04 UTC
+    firsts = {'M': 1_717_200_000_000, 'W': 1_717_977_600_000, 'D': 1_718_409_600_000, '60': 1_718_420_400_000, '1': listing}
+    calls = []
+
+    def request(url, params=None):
+        calls.append(dict(params))
+        first = firsts[params['interval']]
+        return FakeResponse({'data': {'BTCUSDT': [{'t': first, 'o': '1', 'c': '2', 'h': '3', 'l': '0.5', 'v': '4'}]}})
+
+    monkeypatch.setattr(requests, 'get', request)
+    monkeypatch.setattr(driver, 'validate_response', lambda response: None)
+
+    assert driver.get_starting_time('BTC-USDT') == listing
+    assert [call['interval'] for call in calls] == ['M', 'W', 'D', '60', '1']
+    # Every window after the first starts at the previous step's first candle and stays under 200 rows.
+    # The weekly window looks one week back so a week bucket starting in the previous month is seen.
+    assert calls[1]['start'] == firsts['M'] // 1000 - 7 * 86400 and calls[1]['end'] == calls[1]['start'] + 35 * 86400
+    assert calls[4]['start'] == firsts['60'] // 1000 and calls[4]['end'] == calls[4]['start'] + 3600
+    assert all(call['limit'] == 200 for call in calls)
+
+    monkeypatch.setattr(requests, 'get', lambda url, params=None: FakeResponse({'data': {}}))
+    with pytest.raises(exceptions.InvalidSymbol):
+        driver.get_starting_time('NOPE-USDT')
+
+
+def test_bitfinex_starting_time_is_the_first_minute_candle(monkeypatch):
+    driver = drivers['Bitfinex Spot']()
+    driver.all_unique_symbols = {'BTC-USD': 'BTCUSD'}
+    captured = {}
+    listing = 1_364_774_820_000  # 2013-04-01 00:07 UTC
+
+    def request(url, params=None):
+        captured['url'] = url
+        captured.update(params or {})
+        return FakeResponse([[listing, '1', '2', '3', '0.5', '4']])
+
+    monkeypatch.setattr(driver, '_make_request', request)
+
+    assert driver.get_starting_time('BTC-USD') == listing
+    assert captured['url'].endswith('/trade:1m:tBTCUSD/hist') and captured['sort'] == 1 and captured['limit'] == 1
+
+    monkeypatch.setattr(driver, '_make_request', lambda url, params=None: FakeResponse([]))
+    with pytest.raises(exceptions.SymbolNotFound):
+        driver.get_starting_time('BTC-USD')
+    # A symbol the exchange does not list is rejected before any candle request is made.
+    with pytest.raises(exceptions.SymbolNotFound):
+        driver.get_starting_time('NOPE-USD')
+
+
+def test_hyperliquid_starting_time_refines_day_to_minute_within_retention(monkeypatch):
+    driver = drivers['Hyperliquid Perpetual']()
+    day, hour, minute = 1_733_356_800_000, 1_733_400_000_000, 1_733_401_260_000
+    calls = []
+
+    def post(url, json=None, headers=None):
+        req = json['req']
+        calls.append((req['interval'], req['startTime'], req['endTime']))
+        first = {'1d': day, '1h': hour, '1m': minute}[req['interval']]
+        return FakeResponse([{'t': first, 'o': '1', 'c': '2', 'h': '3', 'l': '0.5', 'v': '4'}])
+
+    monkeypatch.setattr(requests, 'post', post)
+
+    assert driver.get_starting_time('HYPE-USD') == minute
+    assert [call[0] for call in calls] == ['1d', '1h', '1m']
+    assert calls[0][1] == 0 and calls[1][1:] == (day, day + 86_400_000) and calls[2][1:] == (hour, hour + 3_600_000)
+
+    # Outside hourly retention the day start is kept, which is never later than the first candle.
+    def post_old(url, json=None, headers=None):
+        return FakeResponse([{'t': day, 'o': '1', 'c': '2', 'h': '3', 'l': '0.5', 'v': '4'}] if json['req']['interval'] == '1d' else [])
+
+    monkeypatch.setattr(requests, 'post', post_old)
+    assert driver.get_starting_time('BTC-USD') == day

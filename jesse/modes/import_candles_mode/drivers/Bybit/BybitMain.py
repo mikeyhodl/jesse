@@ -27,22 +27,24 @@ class BybitMain(CandleExchange):
         )
         self.session.mount('https://', HTTPAdapter(max_retries=retries, pool_maxsize=100))
 
-    def get_starting_time(self, symbol: str) -> int:
+    def get_starting_time(self, symbol: str) -> Union[int, None]:
         dashless_symbol = jh.dashless_symbol(symbol)
+        # Bybit answers `start` in ascending order, so one 1m candle from 2018 is the exact
+        # listing minute. The former weekly lookup skipped the whole listing week.
         payload = {
             'category': self.category,
             'symbol': dashless_symbol,
-            'interval': 'W',
-            'limit': 200,
+            'interval': '1',
+            'limit': 1,
             'start': 1514811660000
         }
 
         response = self.session.get(self.endpoint + '/v5/market/kline', params=payload, timeout=10)
         self.validate_response(response)
         data = response.json()['result']['list']
-        # Reverse the data list
-        data = data[::-1]
-        return int(data[1][0])
+        if not data:
+            return None
+        return int(data[0][0])
 
     def fetch(self, symbol: str, start_timestamp: int, timeframe: str = '1m') -> Union[list, None]:
         dashless_symbol = jh.dashless_symbol(symbol)

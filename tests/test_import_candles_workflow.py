@@ -80,6 +80,9 @@ class _FakeDriver(CandleExchange):
 
     def fetch(self, symbol, start_timestamp, timeframe='1m'):
         self.fetches.append((symbol, start_timestamp, timeframe))
+        return self._rows(symbol, start_timestamp, timeframe)
+
+    def _rows(self, symbol, start_timestamp, timeframe):
         return [
             {
                 'id': f'id-{start_timestamp + i * 60_000}',
@@ -428,3 +431,85 @@ def test_backup_exchange_fetches_and_stores_when_database_range_is_absent(monkey
     assert fetches == [('BTC-USDT', start, '1m')]
     assert len(result) == 2
     assert all(c['exchange'] == 'Primary Provider' for c in result)
+
+
+class _ListedDriver(_FakeDriver):
+    """Behave like Binance: a start before the listing returns the first real candles instead."""
+
+    def __init__(self, fetches, listing, count=720, starting_time=None):
+        super().__init__(fetches, count=count, starting_time=starting_time)
+        self.listing = listing
+
+    def fetch(self, symbol, start_timestamp, timeframe='1m'):
+        self.fetches.append((symbol, start_timestamp, timeframe))
+        return self._rows(symbol, max(start_timestamp, self.listing), timeframe)
+
+
+def test_import_with_existing_candles_skips_history_before_the_listing(monkeypatch):
+    # regression: an earlier start date on a recently listed symbol paged backward through years
+    # of empty history one request at a time, taking minutes to import nothing.
+    fixed_now = arrow.get('2024-01-03T00:00:00Z')
+    listing = arrow.get('2024-01-01T12:00:00Z').int_timestamp * 1000
+    stored_first = listing
+    stored_latest = arrow.get('2024-01-02T00:00:00Z').int_timestamp * 1000 - 60_000
+    state = {'range': None, 'counts': {}, 'bounds': (stored_first, stored_latest)}
+    fetches = []
+    driver = _ListedDriver(fetches, listing, starting_time=listing)
+    _configure_import(monkeypatch, state, driver, fixed_now)
+    monkeypatch.setattr(importer, '_store_import_progress', lambda *values: None)
+
+    result = importer.run('client-listed', driver.name, 'AAPL-USDT', '2022-01-01', running_via_dashboard=False)
+
+    # Only the suffix after the stored data is requested; nothing before the listing is paged.
+    assert all(start >= stored_latest + 60_000 for _, start, _ in fetches)
+    assert len(fetches) == 2
+    assert len(state['stored']) == 1440
+    assert 'earliest available candle was "2024-01-01"' in result
+
+
+def test_prefix_backfill_stops_when_the_exchange_only_has_later_candles(monkeypatch):
+    # A driver that cannot report its listing still stops after one empty pre-listing page.
+    fixed_now = arrow.get('2024-01-03T00:00:00Z')
+    listing = arrow.get('2024-01-01T12:00:00Z').int_timestamp * 1000
+    stored_latest = arrow.get('2024-01-03T00:00:00Z').int_timestamp * 1000 - 60_000
+    state = {'range': None, 'counts': {}, 'bounds': (listing, stored_latest)}
+    fetches = []
+    driver = _ListedDriver(fetches, listing, starting_time=None)
+    _configure_import(monkeypatch, state, driver, fixed_now)
+    monkeypatch.setattr(importer, '_store_import_progress', lambda *values: None)
+
+    result = importer.run('client-prefix', driver.name, 'AAPL-USDT', '2022-01-01', running_via_dashboard=False)
+
+    assert len(fetches) == 1
+    assert fetches[0][1] < listing
+    assert state.get('stored', []) == []
+    assert '0 observed candles' in result
+    assert 'Existing rows were retained' in result
+
+
+def test_legacy_adapter_reports_listing_time_and_propagates_unknown_symbols():
+    from jesse.services.historical_data import HistoricalCandleRange, HistoricalCandleRequest
+    from jesse.services.historical_data.errors import ProviderSymbolNotFoundError
+
+    start, end = 1_000_000, 5_000_000
+
+    def request():
+        return HistoricalCandleRequest('AAPL-USDT', '1m', HistoricalCandleRange(start, end))
+
+    assert _FakeDriver([], starting_time=None).find_earliest_available_timestamp(request()) == start
+    assert _FakeDriver([], starting_time=500_000).find_earliest_available_timestamp(request()) == start
+    assert _FakeDriver([], starting_time=2_000_000).find_earliest_available_timestamp(request()) == 2_000_000
+    assert _FakeDriver([], starting_time=end).find_earliest_available_timestamp(request()) is None
+
+    class UnknownSymbolDriver(_FakeDriver):
+        def get_starting_time(self, symbol):
+            from jesse import exceptions
+            raise exceptions.SymbolNotFound('unknown')
+
+    class FlakyDriver(_FakeDriver):
+        def get_starting_time(self, symbol):
+            raise RuntimeError('listing endpoint down')
+
+    with pytest.raises(ProviderSymbolNotFoundError):
+        UnknownSymbolDriver([]).find_earliest_available_timestamp(request())
+    assert FlakyDriver([]).find_earliest_available_timestamp(request()) == start

@@ -48,6 +48,29 @@ class CandleExchange(HistoricalCandleProvider, ABC):
     def fetch(self, symbol: str, start_timestamp: int, timeframe: str) -> list:
         pass
 
+    def find_earliest_available_timestamp(self, request: HistoricalCandleRequest) -> int | None:
+        """
+        Clip the request to the symbol's listing so an early start date does not page through
+        years of empty history one request at a time.
+        """
+        try:
+            starting_time = self.get_starting_time(request.symbol)
+        except HistoricalDataError:
+            raise
+        except (exceptions.SymbolNotFound, exceptions.InvalidSymbol) as exc:
+            raise ProviderSymbolNotFoundError(str(exc)) from exc
+        except exceptions.ExchangeInMaintenance as exc:
+            raise ProviderUnavailableError(str(exc)) from exc
+        except Exception:
+            # A driver without a reliable listing lookup falls back to paging; the page loop
+            # still stops as soon as the exchange reports only later candles.
+            return request.requested_range.start_timestamp
+        if starting_time is None:
+            return request.requested_range.start_timestamp
+        if starting_time >= request.requested_range.end_timestamp:
+            return None
+        return max(request.requested_range.start_timestamp, int(starting_time))
+
     def _fetch_candles(self, request: HistoricalCandleRequest) -> HistoricalCandleBatch:
         """Adapt one legacy provider page to the shared immutable candle contract."""
         interval = timeframe_to_one_minutes(request.timeframe) * 60_000

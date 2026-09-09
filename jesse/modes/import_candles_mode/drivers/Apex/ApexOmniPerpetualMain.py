@@ -14,28 +14,46 @@ class ApexOmniPerpetualMain(CandleExchange):
         self.name = name
         self.endpoint = rest_endpoint
 
-    def get_starting_time(self, symbol: str) -> int:
+    # Apex returns the newest candles of a window that exceeds its 200-row limit, so the first
+    # candle is found by narrowing the window one interval at a time: month, week, day, hour,
+    # minute. Each step is (interval, window length, look-back) in seconds; the look-back lets a
+    # weekly bucket that starts in the previous month still be found.
+    _FIRST_CANDLE_STEPS = (
+        ('M', None, 0),
+        ('W', 35 * 86400, 7 * 86400),
+        ('D', 8 * 86400, 0),
+        ('60', 86400, 0),
+        ('1', 3600, 0),
+    )
+
+    def get_starting_time(self, symbol: str) -> Union[int, None]:
         dashless_symbol = jh.dashless_symbol(symbol)
-        payload = {
-            'symbol': dashless_symbol,
-            'interval': 'W',
-            'limit': 200,
-            'start': 1514811660
-        }
+        window_start = 1514811660
+        window_end = int(jh.now_to_timestamp() / 1000)
+        first_timestamp = None
+        for interval, window_seconds, look_back in self._FIRST_CANDLE_STEPS:
+            step_start = max(window_start - look_back, 0)
+            payload = {
+                'symbol': dashless_symbol,
+                'interval': interval,
+                'start': step_start,
+                'end': window_end if window_seconds is None else step_start + window_seconds,
+                'limit': 200,
+            }
+            response = requests.get(self.endpoint + '/klines', params=payload)
+            self.validate_response(response)
 
-        response = requests.get(self.endpoint + '/klines', params=payload)
-        self.validate_response(response)
+            if 'data' not in response.json():
+                raise exceptions.ExchangeInMaintenance(response.json()['msg'])
+            elif response.json()['data'] == {}:
+                raise exceptions.InvalidSymbol('Exchange does not support the entered symbol. Please enter a valid symbol.')
 
-        if 'data' not in response.json():
-            raise exceptions.ExchangeInMaintenance(response.json()['msg'])
-        elif response.json()['data'] == {}:
-            raise exceptions.InvalidSymbol('Exchange does not support the entered symbol. Please enter a valid symbol.')
-
-        data = response.json()['data'][dashless_symbol]
-        # Reverse the data list
-        data = data[::-1]
-
-        return int(data[1]['t'])
+            data = response.json()['data'].get(dashless_symbol) or []
+            if not data:
+                break
+            first_timestamp = int(data[0]['t'])
+            window_start = int(first_timestamp / 1000)
+        return first_timestamp
 
     def fetch(self, symbol: str, start_timestamp: int, timeframe: str = '1m') -> Union[list, None]:
         dashless_symbol = jh.dashless_symbol(symbol)

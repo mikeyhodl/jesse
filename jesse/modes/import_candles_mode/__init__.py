@@ -358,6 +358,28 @@ def _run(
                 )
 
             _raise_if_cancelled(client_id, running_via_dashboard)
+            if (
+                is_prefix_backfill
+                and not batch.candles
+                and batch.next_available_timestamp is not None
+                and batch.next_available_timestamp >= page_end
+            ):
+                # The exchange answered a pre-listing page with its first real candle, so nothing
+                # older exists: finish the prefix instead of paging through empty history.
+                completed_work += page_end - range_start
+                _report_import_progress(
+                    client_id,
+                    exchange,
+                    symbol,
+                    completed_span + completed_work,
+                    total_span,
+                    0,
+                    range_start,
+                    running_via_dashboard,
+                    show_progressbar,
+                )
+                cursor = range_start
+                continue
             candle_repository.store_observed_candles(exchange, symbol, '1m', batch.candles)
             processed_candles += len(batch.candles)
             if batch.candles:
