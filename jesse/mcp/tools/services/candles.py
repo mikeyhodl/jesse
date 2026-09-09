@@ -770,3 +770,71 @@ def search_symbols_service(exchange: str, query: str, limit: int = 20) -> dict:
             "error_type": "network_error",
             "message": f"Network error during symbol search: {str(e)}",
         }
+
+
+def copy_candles_service(
+    exchange: str,
+    symbol: str,
+    target_exchange: str,
+    target_symbol: Optional[str] = None,
+    delete_source: bool = False,
+) -> dict:
+    """
+    Duplicate stored candles under another exchange (and optionally symbol).
+
+    Lets a backtest select the same data as a different market, e.g. Massive Stocks
+    SPY-USD copied to a crypto exchange name so its simulation model applies.
+
+    Returns:
+        Copy summary or error message
+    """
+    api_url = mcp_config.JESSE_API_URL
+    password = mcp_config.JESSE_PASSWORD
+
+    try:
+        auth_token_hashed = hash_password(password)
+        # Copying a multi-year series row by row can take a while; keep the request bounded but generous.
+        response = requests.post(
+            f'{api_url}/candles/copy',
+            headers={'Authorization': auth_token_hashed},
+            json={
+                'exchange': exchange,
+                'symbol': symbol,
+                'target_exchange': target_exchange,
+                'target_symbol': target_symbol,
+                'delete_source': delete_source,
+            },
+            timeout=600,
+        )
+
+        if response.status_code == 200:
+            data = response.json()
+            return {
+                "status": "success",
+                "action": "candles_moved" if delete_source else "candles_copied",
+                "source": {"exchange": exchange, "symbol": symbol},
+                "target": {"exchange": data.get('target_exchange'), "symbol": data.get('target_symbol')},
+                "copied_count": data.get('copied_count'),
+                "deleted_count": data.get('deleted_count'),
+                "message": data.get('message', 'Candles copied successfully'),
+            }
+        try:
+            detail = response.json().get('error') or response.text
+        except ValueError:
+            detail = response.text
+        return {
+            "status": "error",
+            "action": "candles_copy_failed",
+            "error_type": "api_error",
+            "http_status": response.status_code,
+            "message": f"Failed to copy candles: {detail}",
+        }
+    except ValueError as e:
+        return {"status": "error", "action": "config_error", "message": str(e)}
+    except Exception as e:
+        return {
+            "status": "error",
+            "action": "candles_copy_failed",
+            "error_type": "network_error",
+            "message": f"Network error during candle copy: {str(e)}",
+        }

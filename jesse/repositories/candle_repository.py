@@ -28,6 +28,113 @@ def delete_candles_from_db(exchange: str, symbol: str) -> None:
     ).execute()
 
 
+class CandlesAlreadyExist(Exception):
+    """The target exchange and symbol already hold candles; refuse to mix two series."""
+
+
+# Each chunk is one server-side INSERT ... SELECT that commits on its own, so a multi-year series
+# copies in seconds and never holds a long table lock (new Jesse processes take one on startup).
+COPY_CANDLES_BATCH_SIZE = 100_000
+
+
+def _new_candle_id_sql() -> peewee.SQL:
+    """
+    A fresh UUID expression for the bound database.
+
+    PostgreSQL gets a time-ordered id (microsecond clock prefix, random suffix) instead of a
+    random v4: on a candle table with over a hundred million rows, random keys scatter every
+    insert across the primary-key index and run about 25x slower than appending in order.
+    """
+    if isinstance(Candle._meta.database, peewee.PostgresqlDatabase):
+        return peewee.SQL(
+            "(lpad(to_hex((extract(epoch from clock_timestamp()) * 1000000)::bigint), 16, '0')"
+            " || substr(md5(random()::text), 1, 16))::uuid"
+        )
+    return peewee.SQL(
+        "lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)), 2)"
+        " || '-' || substr('89ab', abs(random()) % 4 + 1, 1) || substr(hex(randomblob(2)), 2)"
+        " || '-' || hex(randomblob(6)))"
+    )
+
+
+def copy_candles(
+    exchange: str,
+    symbol: str,
+    target_exchange: str,
+    target_symbol: str,
+    delete_source: bool = False,
+) -> dict:
+    """
+    Duplicate every stored candle (all timeframes) of one exchange/symbol under another
+    exchange and/or symbol so backtests can select the same data as a different market.
+
+    Refuses to copy onto itself or onto a target that already has candles, so no two
+    series are ever merged. With `delete_source=True` the original rows are removed once
+    the copy is complete, which turns the copy into a rename. Chunks commit individually:
+    if a copy is interrupted, delete the partial target before retrying.
+    """
+    if (target_exchange, target_symbol) == (exchange, symbol):
+        raise ValueError('The target must differ from the source exchange or symbol')
+
+    source_filter = (Candle.exchange == exchange) & (Candle.symbol == symbol)
+    target_filter = (Candle.exchange == target_exchange) & (Candle.symbol == target_symbol)
+    if not Candle.select(Candle.id).where(source_filter).limit(1).exists():
+        raise ValueError(f'No candles are stored for {symbol} on {exchange}')
+    if Candle.select(Candle.id).where(target_filter).limit(1).exists():
+        raise CandlesAlreadyExist(
+            f'{target_symbol} on {target_exchange} already has candles; delete them first'
+        )
+
+    copied = 0
+    timeframes = [
+        timeframe
+        for (timeframe,) in Candle.select(Candle.timeframe).where(source_filter).distinct().tuples()
+    ]
+    insert_fields = [
+        Candle.id, Candle.timestamp, Candle.open, Candle.close, Candle.high, Candle.low, Candle.volume,
+        Candle.exchange, Candle.symbol, Candle.timeframe,
+    ]
+    for timeframe in timeframes:
+        timeframe_filter = source_filter & (
+            Candle.timeframe.is_null() if timeframe is None else (Candle.timeframe == timeframe)
+        )
+        last_timestamp = None
+        while True:
+            chunk_filter = timeframe_filter
+            if last_timestamp is not None:
+                chunk_filter &= Candle.timestamp > last_timestamp
+            # Keyset boundaries keep every statement bounded regardless of the series length.
+            boundary = (
+                Candle.select(Candle.timestamp)
+                .where(chunk_filter)
+                .order_by(Candle.timestamp)
+                .limit(1)
+                .offset(COPY_CANDLES_BATCH_SIZE - 1)
+                .scalar()
+            )
+            if boundary is not None:
+                chunk_filter &= Candle.timestamp <= boundary
+                chunk_size = COPY_CANDLES_BATCH_SIZE
+            else:
+                # Only the final chunk needs counting; every earlier one is exactly one batch.
+                chunk_size = Candle.select().where(chunk_filter).count()
+            # Drivers disagree on what an INSERT ... SELECT returns, so the count comes from the keyset.
+            Candle.insert_from(
+                Candle.select(
+                    _new_candle_id_sql(), Candle.timestamp, Candle.open, Candle.close, Candle.high,
+                    Candle.low, Candle.volume, peewee.Value(target_exchange), peewee.Value(target_symbol),
+                    Candle.timeframe,
+                ).where(chunk_filter),
+                insert_fields,
+            ).execute()
+            copied += chunk_size
+            if boundary is None:
+                break
+            last_timestamp = boundary
+    deleted = Candle.delete().where(source_filter).execute() if delete_source else 0
+    return {'copied': copied, 'deleted': deleted}
+
+
 def purge_candles_by_exchanges(exchanges: list) -> int:
     """
     Deletes all candles for the given list of exchanges. Returns the number of deleted rows.

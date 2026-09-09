@@ -15,6 +15,7 @@ The tools include:
 - get_existing_candles: List all imported candle data
 - delete_candles: Remove candle data from database
 - search_symbols: Find importable symbols on a candle source by ticker or instrument name
+- copy_candles: Duplicate stored candles under another exchange or symbol name
 
 For real-time import progress monitoring, use get_candle_import_progress from events.py
 All tools require authentication via Jesse admin password.
@@ -33,6 +34,7 @@ from jesse.mcp.tools.services.candles import (
     preview_custom_candle_csv_service,
     clean_and_import_custom_candle_csv_service,
     search_symbols_service,
+    copy_candles_service,
 )
 
 
@@ -690,3 +692,33 @@ def register_candles_tools(mcp):
         Pass the returned `symbol` value verbatim to import_candles().
         """
         return search_symbols_service(exchange=exchange, query=query, limit=limit)
+
+    @mcp.tool()
+    def copy_candles(
+        exchange: str,
+        symbol: str,
+        target_exchange: str,
+        target_symbol: Optional[str] = None,
+        delete_source: bool = False,
+    ) -> dict:
+        """Duplicate stored candles under another exchange name (and optionally another symbol).
+
+        Use this when the user wants to backtest data they already imported as if it belonged
+        to a different market, for example run Massive Stocks "SPY-USD" under
+        "Binance Perpetual Futures" as "SPY-USDT" to use that exchange's futures simulation.
+        Every stored timeframe is copied. `target_exchange` must be a backtesting-capable
+        exchange name exactly as Jesse lists it, and `target_symbol` defaults to `symbol`;
+        set it when the target market quotes in another currency (USD vs USDT).
+
+        The copy refuses to run if the target already has candles, so nothing is ever merged.
+        With `delete_source=True` the original is removed in the same transaction (a rename);
+        confirm with the user before doing that, and never do it for data that is still being
+        updated from its provider, because updates only work under the original exchange name.
+        """
+        return copy_candles_service(
+            exchange=exchange,
+            symbol=symbol,
+            target_exchange=target_exchange,
+            target_symbol=target_symbol,
+            delete_source=delete_source,
+        )

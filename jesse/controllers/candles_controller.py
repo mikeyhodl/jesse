@@ -10,7 +10,14 @@ from starlette.responses import JSONResponse
 from jesse.repositories import candle_repository
 from jesse.services.auth import require_auth, require_auth_form
 from jesse.services.multiprocessing import process_manager
-from jesse.services.web import ImportCandlesRequestJson, CancelRequestJson, GetCandlesRequestJson, DeleteCandlesRequestJson, PurgeCandlesRequestJson
+from jesse.services.web import (
+    ImportCandlesRequestJson,
+    CancelRequestJson,
+    GetCandlesRequestJson,
+    DeleteCandlesRequestJson,
+    PurgeCandlesRequestJson,
+    CopyCandlesRequestJson,
+)
 from jesse.services.redis import is_process_active
 from jesse.services.custom_candle_import import (
     CustomCandleImportError,
@@ -292,6 +299,53 @@ def delete_candles(json_request: DeleteCandlesRequestJson) -> JSONResponse:
         return JSONResponse({'message': 'Candles deleted successfully'}, status_code=200)
     except Exception as e:
         return JSONResponse({'error': str(e)}, status_code=500)
+
+
+@router.post("/copy")
+def copy_candles(json_request: CopyCandlesRequestJson) -> JSONResponse:
+    """
+    Duplicate one exchange/symbol's candles under another exchange (and optionally symbol)
+    so the same data can be selected in backtests as a different market
+    """
+    from jesse.info import backtesting_exchanges
+    from jesse.exceptions import InvalidRoutes
+
+    target_exchange = json_request.target_exchange.strip()
+    target_symbol = (json_request.target_symbol or json_request.symbol).strip().upper()
+    if target_exchange not in backtesting_exchanges:
+        return JSONResponse(
+            {'error': f'{target_exchange!r} is not a backtesting-capable exchange'}, status_code=422
+        )
+    try:
+        # quote_asset() enforces Jesse's BASE-QUOTE symbol contract.
+        jh.quote_asset(target_symbol)
+    except InvalidRoutes as e:
+        return JSONResponse({'error': str(e)}, status_code=422)
+
+    try:
+        result = candle_repository.copy_candles(
+            json_request.exchange,
+            json_request.symbol,
+            target_exchange,
+            target_symbol,
+            delete_source=json_request.delete_source,
+        )
+    except ValueError as e:
+        return JSONResponse({'error': str(e)}, status_code=422)
+    except candle_repository.CandlesAlreadyExist as e:
+        return JSONResponse({'error': str(e)}, status_code=409)
+    except Exception as e:
+        return JSONResponse({'error': str(e)}, status_code=500)
+
+    verb = 'Moved' if json_request.delete_source else 'Copied'
+    return JSONResponse({
+        'message': f"{verb} {result['copied']} candles from {json_request.symbol} on {json_request.exchange} "
+                   f"to {target_symbol} on {target_exchange}",
+        'copied_count': result['copied'],
+        'deleted_count': result['deleted'],
+        'target_exchange': target_exchange,
+        'target_symbol': target_symbol,
+    }, status_code=200)
 
 
 @router.post("/purge")

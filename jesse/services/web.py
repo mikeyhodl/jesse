@@ -247,6 +247,15 @@ class PurgeCandlesRequestJson(BaseModel):
     exchanges: List[str]
 
 
+class CopyCandlesRequestJson(BaseModel):
+    exchange: str
+    symbol: str
+    target_exchange: str
+    # Defaults to the source symbol; override it when the target market uses another quote (USD vs USDT).
+    target_symbol: Optional[str] = None
+    delete_source: bool = False
+
+
 class UpdateOptimizationSessionStateRequestJson(BaseModel):
     id: str
     state: dict

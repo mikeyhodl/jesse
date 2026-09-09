@@ -68,6 +68,26 @@ Source-specific behavior:
   user's intent and pass the returned `symbol` to `import_candles()` verbatim.
 - Massive sources require a stored Massive API key; see `jesse://credentials`.
 
+### copy_candles()
+
+Duplicates stored candles under another exchange name (and optionally another symbol) so a
+backtest can select the same data as a different market, for example to run Massive Stocks
+`SPY-USD` under `Binance Perpetual Futures` as `SPY-USDT` and use that exchange's futures
+simulation settings.
+
+**Parameters:**
+- `exchange`, `symbol`: the stored source series
+- `target_exchange`: a backtesting-capable exchange name exactly as Jesse lists it
+- `target_symbol` (optional): defaults to `symbol`; change it when the target quotes in another
+  currency (`USD` vs `USDT`)
+- `delete_source` (optional, default false): remove the original in the same transaction
+
+Rules: every stored timeframe is copied; the call is refused (HTTP 409) when the target already
+holds candles, so series are never merged; deleting the source turns the copy into a rename, but
+provider updates only work under the original exchange name, so confirm with the user first.
+
+**Returns:** `copied_count`, `deleted_count`, and the resolved target.
+
 ### import_candles()
 
 Imports historical candle data from exchanges.
